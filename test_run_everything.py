@@ -100,8 +100,47 @@ def test_run_everything_wiring():
     assert len(res["review"]) == 0
 
 
+def _mk_xlsx(tmp, name, columns, sheet="Sheet1"):
+    import pandas as pd
+    p = f"{tmp}/{name}"
+    pd.DataFrame(columns=columns).to_excel(p, index=False, sheet_name=sheet)
+    return p
+
+
+def test_detect_cabinets_and_billing(tmp_path=None):
+    """Детектор распознаёт кабинеты и биллинг по сигнатуре колонок."""
+    import tempfile, detect, config
+    tmp = tempfile.mkdtemp()
+    cases = {
+        "Kinguin": ["PRODUCTID", "PRICE", "QTY"],
+        "Driffle": ["Product Title", "Selling Price (EUR)"],
+        "G2A": ["Type", "Amount EUR (Approx,)", "Qty"],
+        "Eneba": ["Тип", "Оплаченная сумма", "name"],
+        "Plati": ["зачислено", "название товара"],
+        "r1": list(config.COLS_R1.values()),
+        "r2": list(config.COLS_R2.values()),
+        "genba": list(config.COLS_GENBA.values()),
+    }
+    for kind, cols in cases.items():
+        p = _mk_xlsx(tmp, f"{kind}.xlsx", cols)
+        assert detect.detect_kind(p) == kind, f"{kind}: got {detect.detect_kind(p)}"
+
+
+def test_detect_carry_events_and_unknown():
+    import tempfile, detect, pandas as pd
+    tmp = tempfile.mkdtemp()
+    pd.DataFrame({"Канал": [], "ID": [], "Остаток_конец": []}).to_csv(f"{tmp}/c.csv", index=False)
+    pd.DataFrame({"ID": [], "События": []}).to_csv(f"{tmp}/e.csv", index=False)
+    assert detect.detect_kind(f"{tmp}/c.csv") == "carry"
+    assert detect.detect_kind(f"{tmp}/e.csv") == "events"
+    # многоколоночная книга не должна цепляться как carry/events
+    p = _mk_xlsx(tmp, "big.xlsx", ["ID", "События", "A", "B", "C", "D", "E", "F"])
+    assert detect.detect_kind(p) is None
+
+
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    tests = [v for k, v in sorted(globals().items())
+             if k.startswith("test_") and callable(v)]
     for t in tests:
         t()
         print(f"  OK  {t.__name__}")
