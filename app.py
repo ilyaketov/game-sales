@@ -1,17 +1,18 @@
 """
-SalesFlow — единое приложение (авто-эталон).
+SalesFlow — единое приложение «Прогнать всё» (закуп + продажи).
 
-Вход БЕЗ эталона: стоячий catalog_master + персистентные маппинги (mappings/) +
-биллинг (R1/R2/genba) + 6 выгрузок витрин + перенос остатков по (канал, ID) +
-События (перемещения, опционально). Выход = собранное «Движение ключей»
-(= авто-эталон) + QB-листы продаж. Новые листинги (нет в маппинге) → ревью
-с подсказкой по имени из catalog_master.
+ОДНО ОКНО ЗАГРУЗКИ: киньте разом биллинг (R1/R2/genba) + 6 выгрузок кабинетов
+(Eneba/Kinguin/Driffle/G2A/Plati/GGSel) и — опционально — Остаток_нач и События.
+Приложение само распознаёт роль каждого файла по сигнатуре колонок и одной
+кнопкой прогоняет всё: закуп (9 площадок), продажи+движение (6 каналов), гейт
+сверки (Загружено↔закуп) и единый лист ручной сверки.
 """
 from __future__ import annotations
 
 import io
 import re
 import tempfile
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -20,25 +21,35 @@ import streamlit as st
 import orchestrator as orch
 import extract_mappings as em
 import plati_bundles as pb
+import config
+import detect
 
-st.set_page_config(page_title="SalesFlow — авто-эталон", layout="wide")
+st.set_page_config(page_title="SalesFlow — прогнать всё", layout="wide")
 
 HERE = Path(__file__).parent
 MAPDIR = HERE / "mappings"
 INDIV = ["Eneba", "Kinguin", "Driffle", "G2A"]
 _WORD = re.compile(r"[a-zа-я0-9]+", re.I)
+_TMP = Path(tempfile.mkdtemp())
+
+KIND_LABEL = detect.KIND_LABEL
+CORE = detect.CORE
 
 
-def _save(u) -> str | None:
-    if u is None:
-        return None
-    d = Path(tempfile.mkdtemp()); p = d / u.name
-    p.write_bytes(u.getbuffer()); return str(p)
+def _save_upload(u) -> str:
+    data = u.getbuffer()
+    digest = hashlib.sha1(bytes(data)).hexdigest()[:12]
+    p = _TMP / f"{digest}_{u.name}"
+    if not p.exists():
+        p.write_bytes(data)
+    return str(p)
 
 
 def _money(v) -> str:
-    try: return f"{float(v):,.2f}".replace(",", " ")
-    except Exception: return str(v)
+    try:
+        return f"{float(v):,.2f}".replace(",", " ")
+    except Exception:
+        return str(v)
 
 
 def _load_mapping(ch: str):
@@ -48,12 +59,10 @@ def _load_mapping(ch: str):
     return em.load_ggsel_mapping(str(f)) if ch == "GGSel" else em.load_df_mapping(str(f))
 
 
-def _opt_col(uploaded, col: str):
-    """Опциональный файл [ID, <col>] (xlsx/csv)."""
-    if uploaded is None:
+def _load_opt_col(path: str, col: str):
+    if path is None:
         return None
-    p = _save(uploaded)
-    df = pd.read_csv(p) if p.endswith(".csv") else pd.read_excel(p, engine="calamine")
+    df = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path, engine="calamine")
     df = df[pd.to_numeric(df["ID"], errors="coerce").notna()].copy()
     df["ID"] = df["ID"].astype("Int64")
     c = col if col in df.columns else df.columns[1]
@@ -61,16 +70,10 @@ def _opt_col(uploaded, col: str):
     return df[["ID", col]]
 
 
-def _load_carryover(uploaded) -> dict:
-    """Перенос остатков → {канал: DataFrame[ID, Остаток_нач]}.
-
-    Поддерживает per-channel файл [Канал, ID, Остаток_нач|Остаток_конец]
-    (выход прошлого месяца) и простой [ID, Остаток_нач] (общий '*').
-    """
-    if uploaded is None:
+def _load_carryover(path: str) -> dict:
+    if path is None:
         return {}
-    p = _save(uploaded)
-    df = pd.read_csv(p) if p.endswith(".csv") else pd.read_excel(p, engine="calamine")
+    df = pd.read_csv(path) if path.endswith(".csv") else pd.read_excel(path, engine="calamine")
     df = df[pd.to_numeric(df["ID"], errors="coerce").notna()].copy()
     df["ID"] = df["ID"].astype("Int64")
     valcol = next((c for c in ("Остаток_нач", "Остаток_конец") if c in df.columns),
@@ -82,12 +85,7 @@ def _load_carryover(uploaded) -> dict:
     return {"*": df[["ID", "Остаток_нач"]]}
 
 
-def _carry(carry_in: dict, channel: str):
-    return carry_in.get(channel, carry_in.get("*"))
-
-
 def _suggest(name: str, cat: pd.DataFrame, cat_tokens: dict) -> str:
-    """Подсказка catID по имени листинга (пересечение токенов с catalog_master)."""
     toks = set(_WORD.findall(str(name).lower()))
     if not toks:
         return ""
@@ -110,103 +108,134 @@ def _xlsx(sheets: dict) -> bytes:
     return buf.getvalue()
 
 
-# ─────────────── UI ───────────────
-st.title("SalesFlow — авто-эталон")
-st.caption("Вход: биллинг + выгрузки + стоячие справочники (без эталона). "
-           "Выход: собранное «Движение ключей» + QB-листы продаж.")
+# ─────────────── UI: одно окно загрузки ───────────────
+st.title("SalesFlow — прогнать всё")
+st.caption("Одно окно: киньте биллинг (R1/R2/genba) + 6 выгрузок кабинетов "
+           "(+ опц. Остаток_нач, События). Роль каждого файла распознаётся сама.")
 
-with st.sidebar:
-    st.header("Биллинг (KeyFlow)")
-    r1_f = st.file_uploader("R1 — Универсальный отчёт", type=["xlsx"], key="r1")
-    r2_f = st.file_uploader("R2 — shipped", type=["xlsx"], key="r2")
-    gen_f = st.file_uploader("genbaFile", type=["xlsx"], key="gen")
-    st.divider()
-    st.header("Справочники")
-    cat_up = st.file_uploader("catalog_master (csv) — по умолч. встроенный",
-                              type=["csv"], key="cat")
-    st.caption(f"Маппинги: встроенные из mappings/ ({len(list(MAPDIR.glob('*_mapping.csv')))} файлов)")
-    st.divider()
-    st.header("Перенос / корректировки")
-    nach_f = st.file_uploader("Остаток_нач (перенос конца прошлого мес.)",
-                              type=["xlsx", "csv"], key="nach")
-    ev_f = st.file_uploader("События (перемещения, опц.)", type=["xlsx", "csv"], key="ev")
+up = st.file_uploader("Перетащите сюда все файлы разом",
+                      type=["xlsx", "csv"], accept_multiple_files=True,
+                      key="all_files")
+
+c1, c2 = st.columns([2, 3])
+with c1:
     report_date = st.date_input("Дата отчёта", value=pd.Timestamp("2026-05-31"))
+with c2:
+    with st.expander("Дополнительно (каталог)"):
+        cat_up = st.file_uploader("catalog_master.csv (по умолч. встроенный)",
+                                  type=["csv"], key="cat")
 
-st.subheader("Выгрузки кабинетов")
-raws = {}
-cols = st.columns(3)
-for i, ch in enumerate(INDIV + ["Plati", "GGSel"]):
-    with cols[i % 3]:
-        raws[ch] = st.file_uploader(f"{ch}", type=["xlsx"], key=f"raw_{ch}")
+if not up:
+    st.info("Загрузите хотя бы биллинг (R1/R2/genba) и выгрузки кабинетов.")
+    st.stop()
 
-run = st.button("Собрать авто-эталон", type="primary")
+# распознаём (кэш по имени+размеру, чтобы не перечитывать на каждом rerun)
+sig = tuple((f.name, f.size) for f in up)
+if st.session_state.get("_detect_sig") != sig:
+    det, unknown = {}, []
+    with st.spinner("Распознаём файлы…"):
+        for f in up:
+            p = _save_upload(f)
+            k = detect.detect_kind(p)
+            if k is None:
+                unknown.append(f.name)
+            else:
+                det[k] = {"name": f.name, "path": p, "size": f.size}
+    st.session_state["_detect_sig"] = sig
+    st.session_state["_detected"] = det
+    st.session_state["_unknown"] = unknown
+det = st.session_state["_detected"]
+unknown = st.session_state["_unknown"]
 
+# карточки распознанного
+st.markdown("**Распознано:**")
+grid = st.columns(3)
+order = CORE + ["carry", "events"]
+for i, k in enumerate(order):
+    with grid[i % 3]:
+        if k in det:
+            st.success(f"✓ {KIND_LABEL[k]}\n\n`{det[k]['name']}`")
+        elif k in CORE:
+            opt = k in ("carry", "events")
+            st.markdown(f"{'○' if opt else '—'} {KIND_LABEL[k]} · _не загружен_")
+for k in ("carry", "events"):
+    if k in det:
+        with grid[(order.index(k)) % 3]:
+            st.info(f"✓ {KIND_LABEL[k]} (опц.)\n\n`{det[k]['name']}`")
+if unknown:
+    st.warning("Не распознаны (пропущены): " + ", ".join(unknown))
+
+missing = [k for k in ("r1", "r2", "genba") if k not in det]
+raw_channels = [k for k in ["Eneba", "Kinguin", "Driffle", "G2A", "Plati", "GGSel"] if k in det]
+
+run = st.button("Прогнать всё (закуп + продажи)", type="primary",
+                disabled=bool(missing))
+if missing:
+    st.error("Для запуска нужен весь биллинг. Не хватает: "
+             + ", ".join(KIND_LABEL[m] for m in missing))
+
+
+# ─────────────── ЗАПУСК: единый run_everything ───────────────
 if run:
-    if not (r1_f and r2_f and gen_f):
-        st.error("Нужны все три биллинговых файла."); st.stop()
-    cat_path = _save(cat_up) if cat_up else str(MAPDIR / "catalog_master.csv")
+    cat_path = _save_upload(cat_up) if cat_up else str(MAPDIR / "catalog_master.csv")
     cat = orch.load_catalog_master(cat_path)
     cat_tokens = {int(r.ID): set(_WORD.findall(str(r.Название).lower()))
                   for r in cat.itertuples()}
-    carry_in = _load_carryover(nach_f)
-    ev = _opt_col(ev_f, "События")
+    carry_in = _load_carryover(det["carry"]["path"]) if "carry" in det else {}
+    events = _load_opt_col(det["events"]["path"], "События") if "events" in det else None
 
-    with st.spinner("Загрузка биллинга (KeyFlow)… ~40с"):
-        pipe = orch.load_pipeline(_save(r1_f), _save(r2_f), _save(gen_f))
-    rd = pd.Timestamp(report_date)
-    results = {}
-    raw_paths = {}
+    raws = {ch: det[ch]["path"] for ch in raw_channels}
+    mappings = {ch: _load_mapping(ch) for ch in raw_channels}
 
-    for ch in INDIV:
-        if raws[ch] is None:
-            continue
-        mp = _load_mapping(ch)
-        rp = _save(raws[ch]); raw_paths[ch] = rp
+    # Plati-бандлы → extra_demand (+ таблица на подтверждение)
+    bundles = pd.DataFrame()
+    bundle_demand = {}
+    if "Plati" in raws:
         try:
-            out = orch.run_channel_m(pipe, ch, rp, mp, cat,
-                                     ostatok_nach=_carry(carry_in, ch), sobytiya=ev, report_date=rd)
-            results[ch] = out
+            bundle_demand, bundles = pb.suggest_from_raw(raws["Plati"], mappings["Plati"], cat)
         except Exception as e:
-            st.warning(f"{ch}: {type(e).__name__}: {e}")
+            st.warning(f"Plati-бандлы: {type(e).__name__}: {e}")
 
-    if raws["Plati"] and raws["GGSel"]:
-        try:
-            plati_raw = _save(raws["Plati"])
-            raw_paths["Plati"] = plati_raw
-            pm = _load_mapping("Plati")
-            try:
-                bundle_demand, bundles = pb.suggest_from_raw(plati_raw, pm, cat)
-            except Exception:
-                bundle_demand, bundles = {}, pd.DataFrame()
-            out = orch.run_combined_m(
-                pipe, ["Plati", "GGSel"],
-                {"Plati": plati_raw, "GGSel": _save(raws["GGSel"])},
-                {"Plati": pm, "GGSel": _load_mapping("GGSel")},
-                cat, ostatok_nach=_carry(carry_in, "Plati+GGSel"), sobytiya=ev,
-                zone="Plati", report_date=rd, extra_demand=bundle_demand)
-            results["Plati+GGSel"] = {"sales_multi": out["sales"],
-                                      "movement": out["movement"],
-                                      "review": out["review"],
-                                      "new_listings": out["new_listings"],
-                                      "bundles": bundles}
-        except Exception as e:
-            st.warning(f"Plati+GGSel: {type(e).__name__}: {e}")
+    with st.spinner("Загрузка биллинга + прогон закупа и продаж… (~60с)"):
+        pipe = orch.load_pipeline(det["r1"]["path"], det["r2"]["path"], det["genba"]["path"])
+        res = orch.run_everything(
+            pipe, cat, raws, mappings, carry=carry_in, events=events,
+            report_date=pd.Timestamp(report_date), extra_demand=bundle_demand)
 
-    # подсказки для новых листингов
-    for ch, out in results.items():
+    # подсказки для новых листингов + бандлы к Plati+GGSel
+    for ch, out in res["sales"].items():
         nl = out.get("new_listings")
         if nl is not None and len(nl):
             nl = nl.copy()
             nl["Подсказка (catalog_master)"] = nl["Наименование"].map(
                 lambda n: _suggest(n, cat, cat_tokens))
             out["new_listings"] = nl
+    if "Plati+GGSel" in res["sales"]:
+        res["sales"]["Plati+GGSel"]["bundles"] = bundles
 
-    st.session_state["res"] = results
-    st.session_state["raw_paths"] = raw_paths
+    st.session_state["res"] = res
+    st.session_state["raws"] = raws
+    st.session_state["rdate"] = pd.Timestamp(report_date)
 
-results = st.session_state.get("res")
-if results:
-    st.subheader("Сводка")
+
+# ─────────────── РЕНДЕР ───────────────
+res = st.session_state.get("res")
+if res:
+    results = res["sales"]
+    rdate = st.session_state.get("rdate", pd.Timestamp(report_date))
+
+    # 1) ГЕЙТ
+    st.subheader("Гейт сверки (Загружено движения ↔ закуп зоны)")
+    rec = res["reconcile"]
+    bad = rec[(rec["Юнит"] != "—") & (rec["Δ"] != 0)]
+    if len(bad) == 0:
+        st.success("Δ = 0 по всем юнитам движения — закуп и «Загружено» сходятся.")
+    else:
+        st.error(f"Расхождение в {len(bad)} юнит(ах) — проверьте проводку.")
+    st.dataframe(rec, use_container_width=True, hide_index=True)
+
+    # 2) СВОДКА ПРОДАЖ
+    st.subheader("Продажи — сводка")
     rows = []
     for ch, out in results.items():
         items = out["sales_multi"].items() if "sales_multi" in out else [(ch, out["sales"])]
@@ -217,7 +246,14 @@ if results:
                          "Новых листингов": int(s["ID"].isna().sum())})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # новые листинги
+    # 3) ЗАКУП
+    st.subheader("Закуп — 9 площадок")
+    prows = [{"Площадка": z, "Товаров": len(v["flat"]), "Кол-во": v["qty"],
+              "Поставщиков": v["suppliers"], "Себестоимость": _money(v["cost"])}
+             for z, v in res["purchases"].items()]
+    st.dataframe(pd.DataFrame(prows), use_container_width=True, hide_index=True)
+
+    # 4) НОВЫЕ ЛИСТИНГИ (editor + сбор маппингов)
     new_all = []
     for ch, out in results.items():
         nl = out.get("new_listings")
@@ -229,9 +265,8 @@ if results:
     new_all = pd.concat(new_all, ignore_index=True) if new_all else pd.DataFrame()
     st.subheader(f"Новые листинги (нет в маппинге) — {len(new_all)}")
     if len(new_all):
-        st.caption("Подтвердите catID (предзаполнен подсказкой), затем соберите "
-                   "обновлённые маппинги для коммита в mappings/. "
-                   "Каналы, ключённые по listing: Eneba/Driffle/G2A/Plati.")
+        st.caption("Подтвердите catID (предзаполнен подсказкой) и соберите обновлённые "
+                   "маппинги для коммита в mappings/.")
 
         def _sugg_id(s):
             m = re.match(r"\s*(\d+)", str(s))
@@ -250,7 +285,7 @@ if results:
 
         if st.button("Собрать обновлённые маппинги (для mappings/)"):
             conf = edited[edited["catID (подтвердить)"].notna()].copy()
-            raw_paths = st.session_state.get("raw_paths", {})
+            raws_ss = st.session_state.get("raws", {})
             updated = {}
             for ch, g in conf.groupby("Канал"):
                 add = pd.DataFrame({"listing": g["Наименование"].astype(str),
@@ -258,15 +293,13 @@ if results:
                                     "product": g["Наименование"].astype(str)})
                 try:
                     if ch == "Kinguin":
-                        cur = _load_mapping("Kinguin")
-                        rp = raw_paths.get("Kinguin")
+                        rp = raws_ss.get("Kinguin")
                         if rp is None:
                             continue
-                        updated["kinguin"] = em.merge_kinguin_mapping(cur, add, rp)
+                        updated["kinguin"] = em.merge_kinguin_mapping(_load_mapping("Kinguin"), add, rp)
                     elif ch == "GGSel":
-                        cur = pd.read_csv(MAPDIR / "ggsel_mapping.csv")
-                        updated["ggsel"] = em.merge_ggsel_mapping(cur, add)
-                    else:  # Eneba/Driffle/G2A/Plati/Plati+GGSel — по listing
+                        updated["ggsel"] = em.merge_ggsel_mapping(pd.read_csv(MAPDIR / "ggsel_mapping.csv"), add)
+                    else:
                         tgt = "plati" if ch == "Plati+GGSel" else ch.lower()
                         cur = _load_mapping("Plati" if ch == "Plati+GGSel" else ch)
                         cur = cur if isinstance(cur, pd.DataFrame) else pd.DataFrame(
@@ -282,74 +315,75 @@ if results:
                 with zipfile.ZipFile(zbuf, "w") as z:
                     for tgt, df in updated.items():
                         z.writestr(f"{tgt}_mapping.csv", df.to_csv(index=False))
-                st.success("Обновлены: " + ", ".join(f"{t} ({len(updated[t])} строк)"
-                                                      for t in updated))
+                st.success("Обновлены: " + ", ".join(f"{t} ({len(updated[t])})" for t in updated))
                 st.download_button("Скачать обновлённые *_mapping.csv (zip)",
-                                   data=zbuf.getvalue(),
-                                   file_name="mappings_updated.zip",
+                                   data=zbuf.getvalue(), file_name="mappings_updated.zip",
                                    mime="application/zip")
     else:
         st.success("Все листинги сопоставлены.")
 
-    # Plati-бандлы: подсказки game+издание (несопоставленные листинги)
+    # 5) Plati-бандлы
     pg = results.get("Plati+GGSel", {})
     bundles = pg.get("bundles")
     if bundles is not None and len(bundles):
         st.subheader(f"Plati-бандлы на подтверждение — {len(bundles)}")
         st.caption("Игра/издание распознаны эвристикой (имя + цена). Подтвердите и "
-                   "добавьте в mappings/plati_mapping.csv (персистентно).")
+                   "добавьте в mappings/plati_mapping.csv.")
         st.dataframe(bundles, use_container_width=True, hide_index=True, height=200)
 
-    # ревью аллокатора
-    rev_all = []
-    for ch, out in results.items():
-        r = out["review"]
-        if len(r):
-            r = r.copy(); r.insert(0, "Канал", ch); rev_all.append(r)
-    rev_all = pd.concat(rev_all, ignore_index=True) if rev_all else pd.DataFrame()
-    st.subheader(f"Ревью разнесения — {len(rev_all)}")
-    if len(rev_all):
-        st.dataframe(rev_all, use_container_width=True, hide_index=True, height=240)
+    # 6) РУЧНАЯ СВЕРКА (консолидированная)
+    review = res["review"]
+    st.subheader(f"Ручная сверка — {len(review)}")
+    if len(review):
+        cat_sum = (review.groupby("Категория")
+                   .agg(Строк=("Позиция", "size"), Нераспределено=("Нераспределено", "sum"))
+                   .reset_index())
+        st.dataframe(cat_sum, use_container_width=True, hide_index=True)
+        st.dataframe(review, use_container_width=True, hide_index=True, height=280)
+    else:
+        st.success("Нечего сверять вручную.")
 
+    # 7) ВКЛАДКИ по каналам
+    st.subheader("По каналам: продажи (QB) и движение (авто-эталон)")
     tabs = st.tabs(list(results.keys()))
     for tab, (ch, out) in zip(tabs, results.items()):
         with tab:
-            c1, c2 = st.columns(2)
-            with c1:
+            a, b = st.columns(2)
+            with a:
                 st.markdown("**Продажи (QB)**")
                 if "sales_multi" in out:
                     for name, s in out["sales_multi"].items():
                         st.caption(name)
                         st.dataframe(s, use_container_width=True, hide_index=True, height=200)
                 else:
-                    st.dataframe(out["sales"], use_container_width=True,
-                                 hide_index=True, height=360)
-            with c2:
+                    st.dataframe(out["sales"], use_container_width=True, hide_index=True, height=360)
+            with b:
                 st.markdown("**Движение ключей (авто-эталон)**")
-                st.dataframe(out["movement"], use_container_width=True,
-                             hide_index=True, height=360)
+                st.dataframe(out["movement"], use_container_width=True, hide_index=True, height=360)
 
+    # 8) СКАЧАТЬ единый xlsx
     st.divider()
-    sheets = {}
+    sheets = {"Гейт": rec, "Ручная сверка": review, "Закуп (свод)": res["purchases_flat"]}
+    for z, v in res["purchases"].items():
+        sheets[f"Закуп {z}"] = v["flat"]
     for ch, out in results.items():
         if "sales_multi" in out:
             for name, s in out["sales_multi"].items():
-                sheets[f"Продажи_{name}"] = s
-            sheets["Движение_Plati_GGSel"] = out["movement"]
+                sheets[f"Продажи {name}"] = s
+            sheets["Движение Plati+GGSel"] = out["movement"]
         else:
-            sheets[f"Продажи_{ch}"] = out["sales"]
-            sheets[f"Движение_{ch}"] = out["movement"]
+            sheets[f"Продажи {ch}"] = out["sales"]
+            sheets[f"Движение {ch}"] = out["movement"]
     if len(new_all):
-        sheets["Новые_листинги"] = new_all
-    if len(rev_all):
-        sheets["Ревью"] = rev_all
+        sheets["Новые листинги"] = new_all
     carry = []
     for ch, out in results.items():
         m = out["movement"][["ID", "Название", "Регион", "Остаток_конец"]].copy()
-        m = m.rename(columns={"Остаток_конец": "Остаток_нач"})  # round-trip: вход след. месяца
-        m.insert(0, "Канал", ch); carry.append(m)
+        m = m.rename(columns={"Остаток_конец": "Остаток_нач"})
+        m.insert(0, "Канал", ch)
+        carry.append(m)
     if carry:
-        sheets["Перенос_остатков"] = pd.concat(carry, ignore_index=True)
-    st.download_button("Скачать авто-эталон (xlsx)", data=_xlsx(sheets),
-                       file_name=f"SalesFlow_{pd.Timestamp(report_date):%Y_%m}.xlsx",
+        sheets["Перенос остатков"] = pd.concat(carry, ignore_index=True)
+    st.download_button("Скачать всё (xlsx)", data=_xlsx(sheets),
+                       file_name=f"SalesFlow_прогнать_всё_{rdate:%Y_%m}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
