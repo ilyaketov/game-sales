@@ -65,6 +65,10 @@ def detect_kind(path: str) -> str | None:
         return "G2A"
     if any("оплаченная сумма" in x for x in c) and "тип" in c:
         return "Eneba"
+    # англ. локаль Eneba (с июня 2026): Paid amount + Buyer country + Order number
+    if any("paid amount" in x for x in c) and any("buyer country" in x for x in c) \
+       and any("order number" in x for x in c):
+        return "Eneba"
     if any("зачислено" in x for x in c):
         return "Plati"
     if len(c & _SIG["r2"]) >= 10:

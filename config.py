@@ -59,15 +59,18 @@ PLOSHADKA_MAP = {
     "Eneba":      {"r1": "закуп энеба",   "r2": "закуп энеба",                    "genba": "eneba"},
     # G2A: в марте было 'закуп г2а' (русские буквы), с апреля — 'Закуп G2A' (английские G2A).
     # Поддерживаем оба варианта, чтобы исторические выгрузки тоже работали.
-    "G2A":        {"r1": None,            "r2": ["закуп г2а", "закуп g2a"],       "genba": "g2a"},
-    "Driffle":    {"r1": None,            "r2": "закуп дриффл",                   "genba": "driffle"},
-    "Tao":        {"r1": None,            "r2": "закуп тао",                      "genba": "тао"},
-    "ChinaPlay":  {"r1": None,            "r2": ["закуп чайна", "costchinaplay"], "genba": ["chinaplay", "costchinaplay"]},
+    "G2A":        {"r1": ["закуп г2а", "закуп g2a"], "r2": ["закуп г2а", "закуп g2a"], "genba": "g2a"},
+    # Driffle: до июня 2026 закуп шёл только в R2, поэтому r1=None. С июня в R1
+    # появились стоковые закупы MP_Driffle (in_stock=НЕТ). R1 и R2 непересекающиеся
+    # (∩ по номерам заказов = 0), поэтому чтение R1 не задваивает.
+    "Driffle":    {"r1": "закуп дриффл",   "r2": "закуп дриффл",                   "genba": "driffle"},
+    "Tao":        {"r1": "закуп тао",     "r2": "закуп тао",                      "genba": "тао"},
+    "ChinaPlay":  {"r1": ["закуп чайна", "costchinaplay"], "r2": ["закуп чайна", "costchinaplay"], "genba": ["chinaplay", "costchinaplay"]},
     "B2B":        {"r1": "продажи б2б",   "r2": ["закуп b2b", "Продажи б2б"],     "genba": "b2b",
                    # Закуп PLAION учитывается весь, даже если ключи передали на другие площадки:
                    # эталон агрегирует PLAION по всем зонам, не только по продажам б2б.
                    "extra_supplier_substrings": ["PLAION"]},
-    "GamersBase": {"r1": None,            "r2": ["закуп гб", "costgb"],           "genba": ["gb", "costgb"]},
+    "GamersBase": {"r1": ["закуп гб", "costgb"], "r2": ["закуп гб", "costgb"],     "genba": ["gb", "costgb"]},
 }
 
 # ---------------------------------------------------------------------------
@@ -125,6 +128,18 @@ SUPPLIER_MAPPING = {
     "Strategy First":              "Strategy First",
     "Frontier Developments":       "Frontier Developments",
     "Incenti":                     "Incenti",
+    # Неклассифицированные поставщики, найденные в мае 2026 (сверка выхода).
+    # Часть — в существующие группы, часть — само-именованные (можно переименовать).
+    "STRATEGY FIRST":              "Strategy First",   # верхний регистр из R2
+    "Giftcard Pro":                "Giftcard pro LTD",  # без скобок
+    "Moogold":                     "Moogold",
+    "GamersBase":                  "GamersBase",
+    "GFAGAMES":                    "GFAGAMES",
+    "MPG":                         "MPG",
+    "Cyber Temple Games LLC":      "Cyber Temple Games LLC",
+    "3 GAMING PILLARS":            "3 Gaming Pillars",
+    "Storytaco Game":              "Storytaco Game",
+    "Wired Productions":           "Wired Productions",
 }
 
 # Спецсопоставления по подстрокам (применяются раньше префиксного парсинга)
@@ -147,6 +162,13 @@ SUPPLIER_SUBSTRING_RULES = [
     ("Embark Studios (Stock)", "Genba"),
     # Embark Studios Tier 1 (Stock) — отдельное имя для USD-Tier 1
     ("Embark Studios Tier",   "Genba"),
+    # Найдено в мае 2026: агрегаторы-суффиксы и сток-бренды
+    ("(Incenti)", "Incenti"),                    # XXX GAMES. PlayStation/Xbox/… (Incenti)
+    ("(VaultN)",  "VaultN"),                     # XXX GAMES. ByteRockers' Games (VaultN)
+    ("Fireshine Games", "Fireshine Games"),      # Fireshine Games (Stock)
+    ("Genba (Stock)", "Genba"),
+    ("Moogold", "Moogold"),                      # Moogold и '… PUBG Mobile (Moogold)'
+    ("GamersBase", "GamersBase"),                # GamersBase и 'GamersBase (Stock)'
 ]
 
 # Точные совпадения (если имя поставщика — это просто слово без префикса)

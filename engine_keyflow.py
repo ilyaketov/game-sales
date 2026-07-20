@@ -251,11 +251,18 @@ class Pipeline:
         тоже поддерживаются (через фолбэк в add_ploshadka_column).
         Колонка 'Ключ куплен в сток' могла отсутствовать в старых выгрузках —
         в этом случае все строки трактуются как закуп (in_stock = NaN → НЕТ).
+
+        Лист данных выбирается по колонкам (pid+supplier+partner), как в R2/genba:
+        начиная с июня 2026 перед сырым листом 'выгрузка' появляются пивоты
+        ('закуп', 'перемещение', …), и жёсткое чтение нулевого листа давало
+        пустой df1 → весь закуп из R1 молча терялся.
         """
+        required = [COLS_R1["pid"], COLS_R1["supplier"], COLS_R1["partner"]]
+        sheet = Pipeline._pick_sheet_with_cols(path, required)
         try:
-            head = pd.read_excel(path, engine="calamine", nrows=1)
+            head = pd.read_excel(path, sheet_name=sheet, engine="calamine", nrows=1)
         except (ImportError, ValueError):
-            head = pd.read_excel(path, nrows=1)
+            head = pd.read_excel(path, sheet_name=sheet, nrows=1)
         actual_cols = list(head.columns)
         resolved = Pipeline._resolve_cols(actual_cols, COLS_R1)
         COLS_R1.update(resolved)
@@ -268,9 +275,9 @@ class Pipeline:
                 cols.append(v)
         cols = list(set(cols))
         try:
-            df = pd.read_excel(path, engine="calamine", usecols=cols)
+            df = pd.read_excel(path, sheet_name=sheet, engine="calamine", usecols=cols)
         except (ImportError, ValueError):
-            df = pd.read_excel(path, usecols=cols)
+            df = pd.read_excel(path, sheet_name=sheet, usecols=cols)
         return add_ploshadka_column(df, COLS_R1)
 
     @staticmethod
